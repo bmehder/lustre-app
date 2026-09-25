@@ -24,7 +24,7 @@ pub fn main() -> Nil {
 
 // MODEL AND MESSAGES ----------------------------------------------------------
 
-type Model {
+pub opaque type Model {
   Model(
     notebook: Notebook,
     draft: Draft,
@@ -36,7 +36,7 @@ type Draft {
   Draft(title: String, body: String)
 }
 
-type GenerationError {
+pub type GenerationError {
   CouldNotGenerateNoteId
 }
 
@@ -47,7 +47,7 @@ type SubmissionError {
   SaveFailed
 }
 
-type Msg {
+pub type Msg {
   TitleChanged(String)
   BodyChanged(String)
   DraftSubmitted
@@ -56,7 +56,7 @@ type Msg {
 
 // LUSTRE LIFECYCLE ------------------------------------------------------------
 
-fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
+pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
   #(
     Model(
       notebook: notebook.new(),
@@ -67,7 +67,7 @@ fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
   )
 }
 
-fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
+pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
   case msg {
     TitleChanged(title) -> #(
       Model(
@@ -121,7 +121,7 @@ fn empty_draft() -> Draft {
 
 // VIEWS -----------------------------------------------------------------------
 
-fn view(model: Model) -> Element(Msg) {
+pub fn view(model: Model) -> Element(Msg) {
   html.main(
     [attribute.class("min-h-screen bg-stone-100 px-4 py-10 text-stone-900")],
     [
