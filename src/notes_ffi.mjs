@@ -1,3 +1,7 @@
 export function randomUUID() {
-  return globalThis.crypto.randomUUID();
+  try {
+    return globalThis.crypto.randomUUID();
+  } catch {
+    return null;
+  }
 }

@@ -1,7 +1,7 @@
 /// The stable identity of a note.
 ///
-/// Keeping this distinct from a bare `String` prevents arbitrary text from
-/// being passed where a UUID is expected.
+/// Keeping this distinct from a bare `String` prevents ordinary strings from
+/// being accidentally used as note identifiers.
 pub type NoteId {
   NoteId(String)
 }

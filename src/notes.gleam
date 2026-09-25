@@ -1,50 +1,125 @@
+import gleam/dynamic.{type Dynamic}
+import gleam/dynamic/decode
 import gleam/int
 import gleam/list
+import gleam/option.{type Option, None, Some}
+import gleam/result
 import lustre
 import lustre/attribute
+import lustre/effect.{type Effect}
 import lustre/element.{type Element}
 import lustre/element/html.{text}
 import lustre/event
-import notes/domain.{type Note, Note, NoteId}
+import notes/domain.{type Note, type NoteId, Note, NoteId}
 import notes/notebook.{type Notebook}
 
+// ENTRY POINT -----------------------------------------------------------------
+
 pub fn main() -> Nil {
-  let app = lustre.simple(init, update, view)
+  let app = lustre.application(init, update, view)
 
   let assert Ok(_) = lustre.start(app, "#app", Nil)
   Nil
 }
 
+// MODEL AND MESSAGES ----------------------------------------------------------
+
 type Model {
-  Model(notebook: Notebook, title: String, body: String)
+  Model(
+    notebook: Notebook,
+    draft: Draft,
+    submission_error: Option(SubmissionError),
+  )
+}
+
+type Draft {
+  Draft(title: String, body: String)
+}
+
+type GenerationError {
+  CouldNotGenerateNoteId
+}
+
+type SubmissionError {
+  IdGenerationFailed
+  TitleRequired
+  DuplicateId
+  SaveFailed
 }
 
 type Msg {
   TitleChanged(String)
   BodyChanged(String)
-  NoteSubmitted
+  DraftSubmitted
+  NoteGenerated(Result(Note, GenerationError))
 }
 
-fn init(_flags: Nil) -> Model {
-  Model(notebook: notebook.new(), title: "", body: "")
+// LUSTRE LIFECYCLE ------------------------------------------------------------
+
+fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
+  #(
+    Model(
+      notebook: notebook.new(),
+      draft: empty_draft(),
+      submission_error: None,
+    ),
+    effect.none(),
+  )
 }
 
-fn update(model: Model, msg: Msg) -> Model {
+fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
   case msg {
-    TitleChanged(title) -> Model(..model, title:)
-    BodyChanged(body) -> Model(..model, body:)
-    NoteSubmitted -> {
-      let note =
-        Note(id: NoteId(random_uuid()), title: model.title, body: model.body)
-
+    TitleChanged(title) -> #(
+      Model(
+        ..model,
+        draft: Draft(..model.draft, title:),
+        submission_error: None,
+      ),
+      effect.none(),
+    )
+    BodyChanged(body) -> #(
+      Model(..model, draft: Draft(..model.draft, body:), submission_error: None),
+      effect.none(),
+    )
+    DraftSubmitted -> #(
+      Model(..model, submission_error: None),
+      generate_note(model.draft),
+    )
+    NoteGenerated(Error(_)) -> #(
+      Model(..model, submission_error: Some(IdGenerationFailed)),
+      effect.none(),
+    )
+    NoteGenerated(Ok(note)) ->
       case notebook.add(model.notebook, note) {
-        Ok(updated_notebook) ->
-          Model(notebook: updated_notebook, title: "", body: "")
-        Error(_) -> model
+        Ok(updated_notebook) -> #(
+          Model(
+            notebook: updated_notebook,
+            draft: empty_draft(),
+            submission_error: None,
+          ),
+          effect.none(),
+        )
+        Error(notebook.EmptyTitle) -> #(
+          Model(..model, submission_error: Some(TitleRequired)),
+          effect.none(),
+        )
+        Error(notebook.DuplicateNoteId(_)) -> #(
+          Model(..model, submission_error: Some(DuplicateId)),
+          effect.none(),
+        )
+        Error(_) -> #(
+          Model(..model, submission_error: Some(SaveFailed)),
+          effect.none(),
+        )
       }
-    }
   }
 }
+
+fn empty_draft() -> Draft {
+  Draft(title: "", body: "")
+}
+
+// VIEWS -----------------------------------------------------------------------
 
 fn view(model: Model) -> Element(Msg) {
   html.main(
@@ -81,8 +156,12 @@ fn note_form(model: Model) -> Element(Msg) {
       html.h1([attribute.class("mb-7 text-4xl font-black tracking-tight")], [
         text("Notes"),
       ]),
+      form_error(model.submission_error),
       html.form(
-        [event.on_submit(fn(_) { NoteSubmitted }), attribute.class("space-y-4")],
+        [
+          event.on_submit(fn(_) { DraftSubmitted }),
+          attribute.class("space-y-4"),
+        ],
         [
           html.div([], [
             html.label(
@@ -95,7 +174,7 @@ fn note_form(model: Model) -> Element(Msg) {
             html.input([
               attribute.id("note-title"),
               attribute.type_("text"),
-              attribute.value(model.title),
+              attribute.value(model.draft.title),
               attribute.placeholder("A useful thought"),
               attribute.required(True),
               attribute.autofocus(True),
@@ -116,7 +195,7 @@ fn note_form(model: Model) -> Element(Msg) {
             html.textarea(
               [
                 attribute.id("note-body"),
-                attribute.value(model.body),
+                attribute.value(model.draft.body),
                 attribute.placeholder("Write it down before it disappears…"),
                 attribute.rows(7),
                 event.on_input(BodyChanged),
@@ -213,6 +292,33 @@ fn note_card(note: Note) -> Element(Msg) {
   )
 }
 
+// VIEW HELPERS ----------------------------------------------------------------
+
+fn form_error(error: Option(SubmissionError)) -> Element(Msg) {
+  case error {
+    None -> element.none()
+    Some(error) ->
+      html.p(
+        [
+          attribute.role("alert"),
+          attribute.class(
+            "mb-4 rounded-xl bg-red-950 px-4 py-3 text-sm font-semibold text-white",
+          ),
+        ],
+        [text(error_message(error))],
+      )
+  }
+}
+
+fn error_message(error: SubmissionError) -> String {
+  case error {
+    IdGenerationFailed -> "Could not generate a note ID. Please try again."
+    TitleRequired -> "A note needs a title."
+    DuplicateId -> "That note already exists. Please try again."
+    SaveFailed -> "Could not save the note. Please try again."
+  }
+}
+
 fn note_count(notes: List(Note)) -> String {
   case list.length(notes) {
     1 -> "1 note"
@@ -220,5 +326,23 @@ fn note_count(notes: List(Note)) -> String {
   }
 }
 
+// BROWSER INTEROP -------------------------------------------------------------
+
+fn generate_note(draft: Draft) -> Effect(Msg) {
+  effect.from(fn(dispatch) {
+    random_note_id()
+    |> result.map(fn(id) { Note(id:, title: draft.title, body: draft.body) })
+    |> NoteGenerated
+    |> dispatch
+  })
+}
+
+fn random_note_id() -> Result(NoteId, GenerationError) {
+  random_uuid_value()
+  |> decode.run(decode.string)
+  |> result.map(NoteId)
+  |> result.map_error(fn(_) { CouldNotGenerateNoteId })
+}
+
 @external(javascript, "./notes_ffi.mjs", "randomUUID")
-fn random_uuid() -> String
+fn random_uuid_value() -> Dynamic
