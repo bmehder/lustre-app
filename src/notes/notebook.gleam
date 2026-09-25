@@ -1,6 +1,9 @@
 import gleam/list
-import gleam/result
-import notes/domain.{type Note, type NoteId, Note}
+import gleam/option.{type Option, None, Some}
+import gleam/string
+import notes/domain.{type Note, type NoteId}
+
+// TYPES -----------------------------------------------------------------------
 
 /// The collection of notes managed by the application.
 pub opaque type Notebook {
@@ -9,9 +12,12 @@ pub opaque type Notebook {
 
 /// The ways a notebook operation can fail.
 pub type Error {
+  EmptyTitle
   DuplicateNoteId(NoteId)
   NoteNotFound(NoteId)
 }
+
+// PUBLIC OPERATIONS -----------------------------------------------------------
 
 /// Create an empty notebook.
 pub fn new() -> Notebook {
@@ -19,84 +25,80 @@ pub fn new() -> Notebook {
 }
 
 /// Return the notes in creation order.
-pub fn all(notebook: Notebook) -> List(Note) {
+pub fn notes(notebook: Notebook) -> List(Note) {
   notebook.notes
 }
 
 /// Add a note to the end of the notebook.
-pub fn create(
-  notebook: Notebook,
-  id: NoteId,
-  title: String,
-  body: String,
-) -> Result(Notebook, Error) {
-  case find_note(notebook.notes, id) {
-    Ok(_) -> Error(DuplicateNoteId(id))
-    Error(_) ->
-      Ok(
-        Notebook(notes: list.append(notebook.notes, [Note(id:, title:, body:)])),
-      )
+pub fn add(notebook: Notebook, note: Note) -> Result(Notebook, Error) {
+  case string.trim(note.title) {
+    "" -> Error(EmptyTitle)
+    _ ->
+      case find_in(notebook.notes, note.id) {
+        Some(_) -> Error(DuplicateNoteId(note.id))
+        None -> Ok(Notebook(notes: list.append(notebook.notes, [note])))
+      }
   }
 }
 
 /// Find a note by its identifier.
 pub fn find(notebook: Notebook, id: NoteId) -> Result(Note, Error) {
-  find_note(notebook.notes, id)
-  |> result.map_error(fn(_) { NoteNotFound(id) })
+  case find_in(notebook.notes, id) {
+    Some(note) -> Ok(note)
+    None -> Error(NoteNotFound(id))
+  }
 }
 
 /// Replace the title and body of an existing note.
-pub fn update(
-  notebook: Notebook,
-  id: NoteId,
-  title: String,
-  body: String,
-) -> Result(Notebook, Error) {
-  case replace_note(notebook.notes, id, title, body) {
-    Ok(notes) -> Ok(Notebook(notes:))
-    Error(_) -> Error(NoteNotFound(id))
+pub fn update(notebook: Notebook, note: Note) -> Result(Notebook, Error) {
+  case string.trim(note.title) {
+    "" -> Error(EmptyTitle)
+    _ ->
+      case replace_in(notebook.notes, note) {
+        Some(notes) -> Ok(Notebook(notes:))
+        None -> Error(NoteNotFound(note.id))
+      }
   }
 }
 
 /// Remove a note from the notebook.
 pub fn delete(notebook: Notebook, id: NoteId) -> Result(Notebook, Error) {
-  case remove_note(notebook.notes, id) {
-    Ok(notes) -> Ok(Notebook(notes:))
-    Error(_) -> Error(NoteNotFound(id))
+  case remove_from(notebook.notes, id) {
+    Some(notes) -> Ok(Notebook(notes:))
+    None -> Error(NoteNotFound(id))
   }
 }
 
-fn find_note(notes: List(Note), id: NoteId) -> Result(Note, Nil) {
+// PRIVATE LIST OPERATIONS -----------------------------------------------------
+
+fn find_in(notes: List(Note), id: NoteId) -> Option(Note) {
   case notes {
-    [] -> Error(Nil)
-    [note, ..] if note.id == id -> Ok(note)
-    [_, ..rest] -> find_note(rest, id)
+    [] -> None
+    [note, ..] if note.id == id -> Some(note)
+    [_, ..rest] -> find_in(rest, id)
   }
 }
 
-fn replace_note(
-  notes: List(Note),
-  id: NoteId,
-  title: String,
-  body: String,
-) -> Result(List(Note), Nil) {
+fn replace_in(notes: List(Note), replacement: Note) -> Option(List(Note)) {
   case notes {
-    [] -> Error(Nil)
-    [note, ..rest] if note.id == id -> Ok([Note(id:, title:, body:), ..rest])
-    [note, ..rest] -> {
-      use updated_rest <- result.map(replace_note(rest, id, title, body))
-      [note, ..updated_rest]
-    }
+    [] -> None
+    [note, ..rest] if note.id == replacement.id -> Some([replacement, ..rest])
+    [note, ..rest] ->
+      case replace_in(rest, replacement) {
+        Some(updated_rest) -> Some([note, ..updated_rest])
+        None -> None
+      }
   }
 }
 
-fn remove_note(notes: List(Note), id: NoteId) -> Result(List(Note), Nil) {
+fn remove_from(notes: List(Note), id: NoteId) -> Option(List(Note)) {
   case notes {
-    [] -> Error(Nil)
-    [note, ..rest] if note.id == id -> Ok(rest)
-    [note, ..rest] -> {
-      use updated_rest <- result.map(remove_note(rest, id))
-      [note, ..updated_rest]
-    }
+    [] -> None
+    [note, ..rest] if note.id == id -> Some(rest)
+    [note, ..rest] ->
+      case remove_from(rest, id) {
+        Some(updated_rest) -> Some([note, ..updated_rest])
+        None -> None
+      }
   }
 }

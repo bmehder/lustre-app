@@ -5,7 +5,7 @@ import lustre/attribute
 import lustre/element.{type Element}
 import lustre/element/html.{text}
 import lustre/event
-import notes/domain.{type Note, NoteId}
+import notes/domain.{type Note, Note, NoteId}
 import notes/notebook.{type Notebook}
 
 pub fn main() -> Nil {
@@ -34,9 +34,10 @@ fn update(model: Model, msg: Msg) -> Model {
     TitleChanged(title) -> Model(..model, title:)
     BodyChanged(body) -> Model(..model, body:)
     NoteSubmitted -> {
-      let id = NoteId(random_uuid())
+      let note =
+        Note(id: NoteId(random_uuid()), title: model.title, body: model.body)
 
-      case notebook.create(model.notebook, id, model.title, model.body) {
+      case notebook.add(model.notebook, note) {
         Ok(updated_notebook) ->
           Model(notebook: updated_notebook, title: "", body: "")
         Error(_) -> model
@@ -142,7 +143,7 @@ fn note_form(model: Model) -> Element(Msg) {
 }
 
 fn note_collection(notebook: Notebook) -> Element(Msg) {
-  let notes = notebook.all(notebook)
+  let notes = notebook.notes(notebook)
 
   html.section([attribute.class("min-w-0")], [
     html.header([attribute.class("mb-6 flex items-end justify-between gap-4")], [
