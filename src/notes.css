@@ -1,0 +1,19 @@
+@import "tailwindcss";
+
+@source "./**/*.gleam";
+
+@theme {
+  --font-sans: "Avenir Next", Avenir, "Segoe UI", sans-serif;
+}
+
+@layer base {
+  body {
+    margin: 0;
+  }
+
+  button,
+  input,
+  textarea {
+    font: inherit;
+  }
+}

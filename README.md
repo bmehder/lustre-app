@@ -1,7 +1,7 @@
 # Notes
 
-An intentionally minimal browser app built with [Gleam](https://gleam.run/) and
-[Lustre](https://hexdocs.pm/lustre/).
+A browser-based notes app built with [Gleam](https://gleam.run/),
+[Lustre](https://hexdocs.pm/lustre/), and Tailwind CSS.
 
 ## Run locally
 
