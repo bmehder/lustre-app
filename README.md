@@ -3,6 +3,14 @@
 A browser-based notes app built with [Gleam](https://gleam.run/),
 [Lustre](https://hexdocs.pm/lustre/), and Tailwind CSS.
 
+## Features
+
+- Create and edit notes.
+- Delete notes with confirmation.
+- Keep notes between browser sessions with local storage.
+- Inspect application history with the optional time-travel development entry
+  point.
+
 ## Run locally
 
 ```sh
@@ -22,5 +30,3 @@ gleam run -m lustre/dev start notes_dev
 
 The development entry point adds a state-history inspector without changing the
 normal application entry point.
-
-# lustre-app
