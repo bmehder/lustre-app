@@ -13,6 +13,9 @@ Then open the address printed by the development server.
 
 ## Run with time travel
 
+The development-only entry point lives at `dev/notes_dev.gleam`, so it can use
+`timetravel` without including the package in production builds.
+
 ```sh
 gleam run -m lustre/dev start notes_dev
 ```

@@ -12,6 +12,11 @@ import lustre/element/html.{text}
 import lustre/event
 import notes/domain.{type Note, type NoteId, Note, NoteId}
 import notes/notebook.{type Notebook}
+import notes/serialization
+import support/confirmation
+import support/local_storage
+
+const storage_key = "notes.notebook"
 
 // ENTRY POINT -----------------------------------------------------------------
 
@@ -28,7 +33,9 @@ pub opaque type Model {
   Model(
     notebook: Notebook,
     draft: Draft,
+    editing: Option(NoteId),
     submission_error: Option(SubmissionError),
+    persistence_status: PersistenceStatus,
   )
 }
 
@@ -47,11 +54,24 @@ type SubmissionError {
   SaveFailed
 }
 
+type PersistenceStatus {
+  Loading
+  Ready
+  PersistenceFailed
+}
+
 pub type Msg {
-  TitleChanged(String)
-  BodyChanged(String)
-  DraftSubmitted
-  NoteGenerated(Result(Note, GenerationError))
+  UserChangedDraftTitle(String)
+  UserChangedDraftBody(String)
+  UserSubmittedDraft
+  NoteGenerated(Note)
+  NoteGenerationFailed(GenerationError)
+  UserRequestedNoteEdit(NoteId)
+  UserCancelledNoteEdit
+  UserRequestedNoteDeletion(NoteId)
+  UserConfirmedNoteDeletion(NoteId)
+  LocalStorageReturnedNotebook(local_storage.LoadResult(Notebook))
+  LocalStorageSaved(local_storage.SaveResult)
 }
 
 // LUSTRE LIFECYCLE ------------------------------------------------------------
@@ -61,15 +81,17 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
     Model(
       notebook: notebook.new(),
       draft: empty_draft(),
+      editing: None,
       submission_error: None,
+      persistence_status: Loading,
     ),
-    effect.none(),
+    load_notebook(),
   )
 }
 
 pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
   case msg {
-    TitleChanged(title) -> #(
+    UserChangedDraftTitle(title) -> #(
       Model(
         ..model,
         draft: Draft(..model.draft, title:),
@@ -77,27 +99,58 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       ),
       effect.none(),
     )
-    BodyChanged(body) -> #(
+    UserChangedDraftBody(body) -> #(
       Model(..model, draft: Draft(..model.draft, body:), submission_error: None),
       effect.none(),
     )
-    DraftSubmitted -> #(
-      Model(..model, submission_error: None),
-      generate_note(model.draft),
-    )
-    NoteGenerated(Error(_)) -> #(
+    UserSubmittedDraft ->
+      case model.editing {
+        None -> #(
+          Model(..model, submission_error: None),
+          generate_note(model.draft),
+        )
+        Some(id) ->
+          case
+            notebook.update(
+              model.notebook,
+              Note(id:, title: model.draft.title, body: model.draft.body),
+            )
+          {
+            Ok(updated_notebook) -> #(
+              Model(
+                notebook: updated_notebook,
+                draft: empty_draft(),
+                editing: None,
+                submission_error: None,
+                persistence_status: Ready,
+              ),
+              save_notebook(updated_notebook),
+            )
+            Error(notebook.EmptyTitle) -> #(
+              Model(..model, submission_error: Some(TitleRequired)),
+              effect.none(),
+            )
+            Error(_) -> #(
+              Model(..model, submission_error: Some(SaveFailed)),
+              effect.none(),
+            )
+          }
+      }
+    NoteGenerationFailed(_) -> #(
       Model(..model, submission_error: Some(IdGenerationFailed)),
       effect.none(),
     )
-    NoteGenerated(Ok(note)) ->
+    NoteGenerated(note) ->
       case notebook.add(model.notebook, note) {
         Ok(updated_notebook) -> #(
           Model(
             notebook: updated_notebook,
             draft: empty_draft(),
+            editing: None,
             submission_error: None,
+            persistence_status: Ready,
           ),
-          effect.none(),
+          save_notebook(updated_notebook),
         )
         Error(notebook.EmptyTitle) -> #(
           Model(..model, submission_error: Some(TitleRequired)),
@@ -112,6 +165,73 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           effect.none(),
         )
       }
+    UserRequestedNoteEdit(id) ->
+      case notebook.find(model.notebook, id) {
+        Ok(note) -> #(
+          Model(
+            ..model,
+            draft: Draft(title: note.title, body: note.body),
+            editing: Some(id),
+            submission_error: None,
+          ),
+          effect.none(),
+        )
+        Error(_) -> #(
+          Model(..model, submission_error: Some(SaveFailed)),
+          effect.none(),
+        )
+      }
+    UserCancelledNoteEdit -> #(
+      Model(
+        ..model,
+        draft: empty_draft(),
+        editing: None,
+        submission_error: None,
+      ),
+      effect.none(),
+    )
+    UserRequestedNoteDeletion(id) -> #(
+      model,
+      confirmation.ask(
+        "Delete this note? This cannot be undone.",
+        on_confirmation: UserConfirmedNoteDeletion(id),
+      ),
+    )
+    UserConfirmedNoteDeletion(id) ->
+      case notebook.delete(model.notebook, id) {
+        Ok(updated_notebook) -> #(
+          case model.editing == Some(id) {
+            True ->
+              Model(
+                ..model,
+                notebook: updated_notebook,
+                draft: empty_draft(),
+                editing: None,
+              )
+            False -> Model(..model, notebook: updated_notebook)
+          },
+          save_notebook(updated_notebook),
+        )
+        Error(_) -> #(model, effect.none())
+      }
+    LocalStorageReturnedNotebook(result) -> #(
+      case result {
+        local_storage.Loaded(notebook) ->
+          Model(..model, notebook:, persistence_status: Ready)
+        local_storage.Missing -> Model(..model, persistence_status: Ready)
+        local_storage.InvalidData | local_storage.LoadUnavailable ->
+          Model(..model, persistence_status: PersistenceFailed)
+      },
+      effect.none(),
+    )
+    LocalStorageSaved(result) -> #(
+      case result {
+        local_storage.Saved -> Model(..model, persistence_status: Ready)
+        local_storage.WriteFailed | local_storage.SaveUnavailable ->
+          Model(..model, persistence_status: PersistenceFailed)
+      },
+      effect.none(),
+    )
   }
 }
 
@@ -125,6 +245,7 @@ pub fn view(model: Model) -> Element(Msg) {
   html.main(
     [attribute.class("min-h-screen bg-stone-100 px-4 py-10 text-stone-900")],
     [
+      persistence_notice(model.persistence_status),
       html.div(
         [
           attribute.class(
@@ -156,10 +277,17 @@ fn note_form(model: Model) -> Element(Msg) {
       html.h1([attribute.class("mb-7 text-4xl font-black tracking-tight")], [
         text("Notes"),
       ]),
+      case model.editing {
+        None -> element.none()
+        Some(_) ->
+          html.p([attribute.class("mb-4 text-sm font-bold text-amber-950")], [
+            text("Editing note"),
+          ])
+      },
       form_error(model.submission_error),
       html.form(
         [
-          event.on_submit(fn(_) { DraftSubmitted }),
+          event.on_submit(fn(_) { UserSubmittedDraft }),
           attribute.class("space-y-4"),
         ],
         [
@@ -178,7 +306,7 @@ fn note_form(model: Model) -> Element(Msg) {
               attribute.placeholder("A useful thought"),
               attribute.required(True),
               attribute.autofocus(True),
-              event.on_input(TitleChanged),
+              event.on_input(UserChangedDraftTitle),
               attribute.class(
                 "w-full rounded-xl border-0 bg-white/80 px-4 py-3 text-base shadow-sm outline-none placeholder:text-stone-400 focus:ring-2 focus:ring-stone-900",
               ),
@@ -198,7 +326,7 @@ fn note_form(model: Model) -> Element(Msg) {
                 attribute.value(model.draft.body),
                 attribute.placeholder("Write it down before it disappears…"),
                 attribute.rows(7),
-                event.on_input(BodyChanged),
+                event.on_input(UserChangedDraftBody),
                 attribute.class(
                   "w-full resize-none rounded-xl border-0 bg-white/80 px-4 py-3 text-base leading-7 shadow-sm outline-none placeholder:text-stone-400 focus:ring-2 focus:ring-stone-900",
                 ),
@@ -206,15 +334,18 @@ fn note_form(model: Model) -> Element(Msg) {
               "",
             ),
           ]),
-          html.button(
-            [
-              attribute.type_("submit"),
-              attribute.class(
-                "w-full rounded-xl bg-stone-900 px-4 py-3 font-bold text-white transition hover:bg-stone-700 focus:outline-none focus:ring-2 focus:ring-stone-900 focus:ring-offset-2 focus:ring-offset-amber-300",
-              ),
-            ],
-            [text("Save note")],
-          ),
+          html.div([attribute.class("flex gap-3")], [
+            html.button(
+              [
+                attribute.type_("submit"),
+                attribute.class(
+                  "flex-1 rounded-xl bg-stone-900 px-4 py-3 font-bold text-white transition hover:bg-stone-700 focus:outline-none focus:ring-2 focus:ring-stone-900 focus:ring-offset-2 focus:ring-offset-amber-300",
+                ),
+              ],
+              [text(submit_label(model.editing))],
+            ),
+            cancel_edit_button(model.editing),
+          ]),
         ],
       ),
     ],
@@ -274,12 +405,46 @@ fn empty_notebook() -> Element(Msg) {
 
 fn note_card(note: Note) -> Element(Msg) {
   html.article(
-    [attribute.class("min-h-48 rounded-3xl bg-white p-6 shadow-sm")],
     [
-      html.h2(
-        [attribute.class("break-words text-xl font-extrabold tracking-tight")],
-        [text(note.title)],
+      attribute.class(
+        "flex min-h-48 flex-col rounded-3xl bg-white p-6 shadow-sm",
       ),
+    ],
+    [
+      html.div([attribute.class("flex items-start justify-between gap-4")], [
+        html.h2(
+          [
+            attribute.class(
+              "min-w-0 break-words text-xl font-extrabold tracking-tight",
+            ),
+          ],
+          [text(note.title)],
+        ),
+        html.div([attribute.class("flex shrink-0 gap-1")], [
+          html.button(
+            [
+              attribute.type_("button"),
+              attribute.aria_label("Edit " <> note.title),
+              attribute.class(
+                "rounded-lg px-2 py-1 text-sm font-bold text-stone-400 transition hover:bg-amber-50 hover:text-amber-800 focus:outline-none focus:ring-2 focus:ring-amber-700",
+              ),
+              event.on_click(UserRequestedNoteEdit(note.id)),
+            ],
+            [text("Edit")],
+          ),
+          html.button(
+            [
+              attribute.type_("button"),
+              attribute.aria_label("Delete " <> note.title),
+              attribute.class(
+                "rounded-lg px-2 py-1 text-sm font-bold text-stone-400 transition hover:bg-red-50 hover:text-red-700 focus:outline-none focus:ring-2 focus:ring-red-700",
+              ),
+              event.on_click(UserRequestedNoteDeletion(note.id)),
+            ],
+            [text("Delete")],
+          ),
+        ]),
+      ]),
       html.p(
         [
           attribute.class(
@@ -293,6 +458,56 @@ fn note_card(note: Note) -> Element(Msg) {
 }
 
 // VIEW HELPERS ----------------------------------------------------------------
+
+fn persistence_notice(status: PersistenceStatus) -> Element(Msg) {
+  case status {
+    Ready -> element.none()
+    Loading ->
+      html.p(
+        [
+          attribute.role("status"),
+          attribute.class(
+            "mx-auto mb-4 max-w-5xl text-sm font-semibold text-stone-500",
+          ),
+        ],
+        [text("Loading saved notes…")],
+      )
+    PersistenceFailed ->
+      html.p(
+        [
+          attribute.role("alert"),
+          attribute.class(
+            "mx-auto mb-4 max-w-5xl rounded-xl bg-red-950 px-4 py-3 text-sm font-semibold text-white",
+          ),
+        ],
+        [text("Notes could not be saved in this browser.")],
+      )
+  }
+}
+
+fn submit_label(editing: Option(NoteId)) -> String {
+  case editing {
+    None -> "Save note"
+    Some(_) -> "Update note"
+  }
+}
+
+fn cancel_edit_button(editing: Option(NoteId)) -> Element(Msg) {
+  case editing {
+    None -> element.none()
+    Some(_) ->
+      html.button(
+        [
+          attribute.type_("button"),
+          attribute.class(
+            "rounded-xl border-2 border-stone-900 px-4 py-3 font-bold text-stone-900 transition hover:bg-amber-200 focus:outline-none focus:ring-2 focus:ring-stone-900 focus:ring-offset-2 focus:ring-offset-amber-300",
+          ),
+          event.on_click(UserCancelledNoteEdit),
+        ],
+        [text("Cancel")],
+      )
+  }
+}
 
 fn form_error(error: Option(SubmissionError)) -> Element(Msg) {
   case error {
@@ -326,14 +541,36 @@ fn note_count(notes: List(Note)) -> String {
   }
 }
 
+// STORAGE EFFECTS -------------------------------------------------------------
+
+fn load_notebook() -> Effect(Msg) {
+  local_storage.load(
+    key: storage_key,
+    reader: serialization.decoder(),
+    writer: serialization.encode,
+    to_message: LocalStorageReturnedNotebook,
+  )
+}
+
+fn save_notebook(notebook: Notebook) -> Effect(Msg) {
+  local_storage.save(
+    key: storage_key,
+    value: notebook,
+    reader: serialization.decoder(),
+    writer: serialization.encode,
+    to_message: LocalStorageSaved,
+  )
+}
+
 // BROWSER INTEROP -------------------------------------------------------------
 
 fn generate_note(draft: Draft) -> Effect(Msg) {
   effect.from(fn(dispatch) {
-    random_note_id()
-    |> result.map(fn(id) { Note(id:, title: draft.title, body: draft.body) })
-    |> NoteGenerated
-    |> dispatch
+    case random_note_id() {
+      Ok(id) ->
+        dispatch(NoteGenerated(Note(id:, title: draft.title, body: draft.body)))
+      Error(error) -> dispatch(NoteGenerationFailed(error))
+    }
   })
 }
 
