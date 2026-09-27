@@ -1,3 +1,7 @@
+@import "tailwindcss";
+
+@source "./**/*.gleam";
+
 @theme {
   --font-sans: "Avenir Next", Avenir, "Segoe UI", sans-serif;
 }

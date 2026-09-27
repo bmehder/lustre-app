@@ -14,7 +14,7 @@ A browser-based notes app built with [Gleam](https://gleam.run/),
 ## Run locally
 
 ```sh
-gleam run -m lustre/dev start
+gleam run -m lustre/dev start notes/app
 ```
 
 Then open the address printed by the development server.

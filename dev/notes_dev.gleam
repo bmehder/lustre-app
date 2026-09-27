@@ -1,9 +1,9 @@
 import lustre
-import notes
+import notes/app
 import timetravel
 
 pub fn main() -> Nil {
-  let app = timetravel.application(notes.init, notes.update, notes.view)
-  let assert Ok(_) = lustre.start(app, "#app", Nil)
+  let application = timetravel.application(app.init, app.update, app.view)
+  let assert Ok(_) = lustre.start(application, "#app", Nil)
   Nil
 }

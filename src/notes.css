@@ -1,4 +1,0 @@
-@import "tailwindcss";
-@import "./notes_styles.css";
-
-@source "./**/*.gleam";

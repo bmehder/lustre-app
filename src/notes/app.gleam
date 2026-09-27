@@ -1,16 +1,16 @@
-import gleam/dynamic.{type Dynamic}
-import gleam/dynamic/decode
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/result
 import lustre
 import lustre/attribute
 import lustre/effect.{type Effect}
 import lustre/element.{type Element}
 import lustre/element/html.{text}
+import lustre/element/keyed
+import lustre/element/svg
 import lustre/event
 import notes/domain.{type Note, type NoteId, Note, NoteId}
+import notes/note_id
 import notes/notebook.{type Notebook}
 import notes/serialization
 import support/confirmation
@@ -32,8 +32,7 @@ pub fn main() -> Nil {
 pub opaque type Model {
   Model(
     notebook: Notebook,
-    draft: Draft,
-    editing: Option(NoteId),
+    editor: Editor,
     submission_error: Option(SubmissionError),
     persistence_status: PersistenceStatus,
   )
@@ -43,8 +42,9 @@ type Draft {
   Draft(title: String, body: String)
 }
 
-pub type GenerationError {
-  CouldNotGenerateNoteId
+type Editor {
+  Creating(draft: Draft)
+  Editing(id: NoteId, draft: Draft)
 }
 
 type SubmissionError {
@@ -65,11 +65,12 @@ pub type Msg {
   UserChangedDraftBody(String)
   UserSubmittedDraft
   NoteGenerated(Note)
-  NoteGenerationFailed(GenerationError)
+  NoteGenerationFailed(note_id.Error)
   UserRequestedNoteEdit(NoteId)
   UserCancelledNoteEdit
   UserRequestedNoteDeletion(NoteId)
   UserConfirmedNoteDeletion(NoteId)
+  UserCancelledNoteDeletion(NoteId)
   LocalStorageReturnedNotebook(local_storage.LoadResult(Notebook))
   LocalStorageSaved(local_storage.SaveResult)
 }
@@ -80,8 +81,7 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
   #(
     Model(
       notebook: notebook.new(),
-      draft: empty_draft(),
-      editing: None,
+      editor: empty_editor(),
       submission_error: None,
       persistence_status: Loading,
     ),
@@ -94,33 +94,36 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     UserChangedDraftTitle(title) -> #(
       Model(
         ..model,
-        draft: Draft(..model.draft, title:),
+        editor: update_editor_title(model.editor, title),
         submission_error: None,
       ),
       effect.none(),
     )
     UserChangedDraftBody(body) -> #(
-      Model(..model, draft: Draft(..model.draft, body:), submission_error: None),
+      Model(
+        ..model,
+        editor: update_editor_body(model.editor, body),
+        submission_error: None,
+      ),
       effect.none(),
     )
     UserSubmittedDraft ->
-      case model.editing {
-        None -> #(
+      case model.editor {
+        Creating(draft) -> #(
           Model(..model, submission_error: None),
-          generate_note(model.draft),
+          generate_note(draft),
         )
-        Some(id) ->
+        Editing(id, draft) ->
           case
             notebook.update(
               model.notebook,
-              Note(id:, title: model.draft.title, body: model.draft.body),
+              Note(id:, title: draft.title, body: draft.body),
             )
           {
             Ok(updated_notebook) -> #(
               Model(
                 notebook: updated_notebook,
-                draft: empty_draft(),
-                editing: None,
+                editor: empty_editor(),
                 submission_error: None,
                 persistence_status: Ready,
               ),
@@ -145,8 +148,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         Ok(updated_notebook) -> #(
           Model(
             notebook: updated_notebook,
-            draft: empty_draft(),
-            editing: None,
+            editor: empty_editor(),
             submission_error: None,
             persistence_status: Ready,
           ),
@@ -170,8 +172,10 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         Ok(note) -> #(
           Model(
             ..model,
-            draft: Draft(title: note.title, body: note.body),
-            editing: Some(id),
+            editor: Editing(
+              id:,
+              draft: Draft(title: note.title, body: note.body),
+            ),
             submission_error: None,
           ),
           effect.none(),
@@ -182,12 +186,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         )
       }
     UserCancelledNoteEdit -> #(
-      Model(
-        ..model,
-        draft: empty_draft(),
-        editing: None,
-        submission_error: None,
-      ),
+      Model(..model, editor: empty_editor(), submission_error: None),
       effect.none(),
     )
     UserRequestedNoteDeletion(id) -> #(
@@ -195,25 +194,22 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       confirmation.ask(
         "Delete this note? This cannot be undone.",
         on_confirmation: UserConfirmedNoteDeletion(id),
+        on_cancellation: UserCancelledNoteDeletion(id),
       ),
     )
     UserConfirmedNoteDeletion(id) ->
       case notebook.delete(model.notebook, id) {
         Ok(updated_notebook) -> #(
-          case model.editing == Some(id) {
-            True ->
-              Model(
-                ..model,
-                notebook: updated_notebook,
-                draft: empty_draft(),
-                editing: None,
-              )
-            False -> Model(..model, notebook: updated_notebook)
-          },
+          Model(
+            ..model,
+            notebook: updated_notebook,
+            editor: stop_editing_deleted_note(model.editor, id),
+          ),
           save_notebook(updated_notebook),
         )
         Error(_) -> #(model, effect.none())
       }
+    UserCancelledNoteDeletion(_) -> #(model, effect.none())
     LocalStorageReturnedNotebook(result) -> #(
       case result {
         local_storage.Loaded(notebook) ->
@@ -239,6 +235,37 @@ fn empty_draft() -> Draft {
   Draft(title: "", body: "")
 }
 
+fn empty_editor() -> Editor {
+  Creating(empty_draft())
+}
+
+fn editor_draft(editor: Editor) -> Draft {
+  case editor {
+    Creating(draft) | Editing(_, draft) -> draft
+  }
+}
+
+fn update_editor_title(editor: Editor, title: String) -> Editor {
+  case editor {
+    Creating(draft) -> Creating(Draft(..draft, title:))
+    Editing(id, draft) -> Editing(id, Draft(..draft, title:))
+  }
+}
+
+fn update_editor_body(editor: Editor, body: String) -> Editor {
+  case editor {
+    Creating(draft) -> Creating(Draft(..draft, body:))
+    Editing(id, draft) -> Editing(id, Draft(..draft, body:))
+  }
+}
+
+fn stop_editing_deleted_note(editor: Editor, deleted_id: NoteId) -> Editor {
+  case editor {
+    Editing(id, _) if id == deleted_id -> empty_editor()
+    _ -> editor
+  }
+}
+
 // VIEWS -----------------------------------------------------------------------
 
 pub fn view(model: Model) -> Element(Msg) {
@@ -259,6 +286,8 @@ pub fn view(model: Model) -> Element(Msg) {
 }
 
 fn note_form(model: Model) -> Element(Msg) {
+  let draft = editor_draft(model.editor)
+
   html.section(
     [
       attribute.class(
@@ -266,20 +295,26 @@ fn note_form(model: Model) -> Element(Msg) {
       ),
     ],
     [
-      html.p(
+      html.div(
+        [attribute.class("mb-2 flex items-center justify-between gap-4")],
         [
-          attribute.class(
-            "mb-2 text-xs font-bold uppercase tracking-[0.2em] text-amber-900/60",
+          html.p(
+            [
+              attribute.class(
+                "text-xs font-bold uppercase tracking-[0.2em] text-amber-900/60",
+              ),
+            ],
+            [text("A quiet place for ideas")],
           ),
+          github_link(),
         ],
-        [text("A quiet place for ideas")],
       ),
       html.h1([attribute.class("mb-7 text-4xl font-black tracking-tight")], [
         text("Notes"),
       ]),
-      case model.editing {
-        None -> element.none()
-        Some(_) ->
+      case model.editor {
+        Creating(_) -> element.none()
+        Editing(_, _) ->
           html.p([attribute.class("mb-4 text-sm font-bold text-amber-950")], [
             text("Editing note"),
           ])
@@ -302,7 +337,7 @@ fn note_form(model: Model) -> Element(Msg) {
             html.input([
               attribute.id("note-title"),
               attribute.type_("text"),
-              attribute.value(model.draft.title),
+              attribute.value(draft.title),
               attribute.placeholder("A useful thought"),
               attribute.required(True),
               attribute.autofocus(True),
@@ -323,7 +358,7 @@ fn note_form(model: Model) -> Element(Msg) {
             html.textarea(
               [
                 attribute.id("note-body"),
-                attribute.value(model.draft.body),
+                attribute.value(draft.body),
                 attribute.placeholder("Write it down before it disappears…"),
                 attribute.rows(7),
                 event.on_input(UserChangedDraftBody),
@@ -342,9 +377,9 @@ fn note_form(model: Model) -> Element(Msg) {
                   "flex-1 rounded-xl bg-stone-900 px-4 py-3 font-bold text-white transition hover:bg-stone-700 focus:outline-none focus:ring-2 focus:ring-stone-900 focus:ring-offset-2 focus:ring-offset-amber-300",
                 ),
               ],
-              [text(submit_label(model.editing))],
+              [text(submit_label(model.editor))],
             ),
-            cancel_edit_button(model.editing),
+            cancel_edit_button(model.editor),
           ]),
         ],
       ),
@@ -377,9 +412,9 @@ fn note_collection(notebook: Notebook) -> Element(Msg) {
     case notes {
       [] -> empty_notebook()
       _ ->
-        html.div(
+        keyed.div(
           [attribute.class("grid gap-4 sm:grid-cols-2")],
-          list.map(notes, note_card),
+          list.map(notes, fn(note) { #(note_key(note.id), note_card(note)) }),
         )
     },
   ])
@@ -459,6 +494,38 @@ fn note_card(note: Note) -> Element(Msg) {
 
 // VIEW HELPERS ----------------------------------------------------------------
 
+fn github_link() -> Element(Msg) {
+  html.a(
+    [
+      attribute.href("https://github.com/bmehder/lustre-app"),
+      attribute.target("_blank"),
+      attribute.rel("noreferrer"),
+      attribute.aria_label("View Notes on GitHub"),
+      attribute.class(
+        "rounded-lg p-1 text-amber-950/60 transition hover:bg-amber-200 hover:text-amber-950 focus:outline-none focus:ring-2 focus:ring-stone-900",
+      ),
+    ],
+    [
+      svg.svg(
+        [
+          attribute.attribute("viewBox", "0 0 24 24"),
+          attribute.attribute("fill", "currentColor"),
+          attribute.aria_hidden(True),
+          attribute.class("size-6"),
+        ],
+        [
+          svg.path([
+            attribute.attribute(
+              "d",
+              "M12 .7a11.5 11.5 0 0 0-3.64 22.41c.58.11.79-.25.79-.56v-2.23c-3.22.7-3.9-1.37-3.9-1.37-.53-1.34-1.29-1.7-1.29-1.7-1.05-.72.08-.71.08-.71 1.16.08 1.78 1.2 1.78 1.2 1.04 1.77 2.72 1.26 3.38.96.1-.75.4-1.26.73-1.55-2.57-.29-5.27-1.28-5.27-5.69 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.47.11-3.05 0 0 .97-.31 3.16 1.18a10.98 10.98 0 0 1 5.76 0c2.2-1.49 3.16-1.18 3.16-1.18.63 1.58.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.42-2.71 5.39-5.29 5.68.42.36.79 1.07.79 2.16v3.21c0 .31.21.68.8.56A11.5 11.5 0 0 0 12 .7Z",
+            ),
+          ]),
+        ],
+      ),
+    ],
+  )
+}
+
 fn persistence_notice(status: PersistenceStatus) -> Element(Msg) {
   case status {
     Ready -> element.none()
@@ -485,17 +552,17 @@ fn persistence_notice(status: PersistenceStatus) -> Element(Msg) {
   }
 }
 
-fn submit_label(editing: Option(NoteId)) -> String {
-  case editing {
-    None -> "Save note"
-    Some(_) -> "Update note"
+fn submit_label(editor: Editor) -> String {
+  case editor {
+    Creating(_) -> "Save note"
+    Editing(_, _) -> "Update note"
   }
 }
 
-fn cancel_edit_button(editing: Option(NoteId)) -> Element(Msg) {
-  case editing {
-    None -> element.none()
-    Some(_) ->
+fn cancel_edit_button(editor: Editor) -> Element(Msg) {
+  case editor {
+    Creating(_) -> element.none()
+    Editing(_, _) ->
       html.button(
         [
           attribute.type_("button"),
@@ -541,6 +608,11 @@ fn note_count(notes: List(Note)) -> String {
   }
 }
 
+fn note_key(id: NoteId) -> String {
+  let NoteId(value) = id
+  value
+}
+
 // STORAGE EFFECTS -------------------------------------------------------------
 
 fn load_notebook() -> Effect(Msg) {
@@ -566,20 +638,10 @@ fn save_notebook(notebook: Notebook) -> Effect(Msg) {
 
 fn generate_note(draft: Draft) -> Effect(Msg) {
   effect.from(fn(dispatch) {
-    case random_note_id() {
+    case note_id.random() {
       Ok(id) ->
         dispatch(NoteGenerated(Note(id:, title: draft.title, body: draft.body)))
       Error(error) -> dispatch(NoteGenerationFailed(error))
     }
   })
 }
-
-fn random_note_id() -> Result(NoteId, GenerationError) {
-  random_uuid_value()
-  |> decode.run(decode.string)
-  |> result.map(NoteId)
-  |> result.map_error(fn(_) { CouldNotGenerateNoteId })
-}
-
-@external(javascript, "./notes_ffi.mjs", "randomUUID")
-fn random_uuid_value() -> Dynamic
